@@ -1,0 +1,34 @@
+# EASE Model Configuration
+# models/EASE_T8108/config/ease_config.yaml
+
+# Data paths
+data:
+  train_file: "../../../data/train/train_ratings.csv"
+  output_dir: "../output/"
+
+# Model hyperparameters
+model:
+  # EASE regularization parameter (lambda)
+  reg_weight: 500.0
+  
+# Weighted EASE parameters (for future use)
+weighted:
+  enabled: false
+  # Time decay parameter (tau) in seconds
+  tau: 30.0
+  # Hard threshold for co-occurrence (seconds), null for soft decay only
+  delta_t_threshold: null
+
+# Evaluation
+eval:
+  # Number of items to recommend per user
+  top_k: 10
+  # Validation ratio (random items to hold out per user)
+  valid_random_items: 9
+  # Sequential items to hold out (last N items)
+  valid_seq_items: 1
+
+# Training
+train:
+  seed: 42
+  verbose: true
