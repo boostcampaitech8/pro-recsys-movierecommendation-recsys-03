@@ -1,0 +1,41 @@
+# RecBole Dataset Configuration for MovieLens
+# 이 파일은 데이터셋 로딩 및 전처리 설정을 정의합니다.
+
+# 기본 설정
+data_path: './data/'
+dataset: 'movielens'
+
+# 필드 설정
+USER_ID_FIELD: user_id
+ITEM_ID_FIELD: item_id
+TIME_FIELD: timestamp
+
+# 데이터 로딩 설정
+load_col:
+  inter: [user_id, item_id, timestamp]
+
+# 필터링 설정 (최소 상호작용 수)
+# 대회 데이터는 이미 필터링되어 있으므로 추가 필터링 불필요
+user_inter_num_interval: "[0,inf)"
+item_inter_num_interval: "[0,inf)"
+
+# 평가 설정
+eval_args:
+  # 전체 아이템에 대해 평가 (full ranking)
+  mode: full
+  # 랜덤 순서로 분할
+  order: RO
+  # train:valid:test 비율 설정
+  split:
+    RS: [0.9, 0.05, 0.05]
+  group_by: user
+
+# 메트릭 설정
+metrics: ['Recall', 'NDCG', 'Hit', 'Precision']
+topk: [10]
+valid_metric: Recall@10
+
+# 네거티브 샘플링 (ADMMSLIM은 사용하지 않음)
+eval_neg_sample_args:
+  distribution: uniform
+  sample_num: none
