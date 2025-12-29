@@ -6,13 +6,16 @@ Usage:
     # Basic EASE
     python run_train.py --reg_weight 500
     
-    # Weighted EASE with time decay
-    python run_train.py --weighted --tau 30 --reg_weight 500
+    # Session-based Weighted EASE
+    python run_train.py --weighted --session_threshold 1800 --page_threshold 30 --alpha 0.3
     
     # Grid search
     python run_train.py --grid_search
 """
 
+import itertools
+from functools import lru_cache
+from typing import Dict, List, Any, Tuple
 import argparse
 import os
 import sys
@@ -43,32 +46,19 @@ def parse_args():
     
     # Model type selection
     parser.add_argument('--weighted', action='store_true',
-                        help='Use weighted EASE (hybrid window, time-only)')
-    parser.add_argument('--combined', action='store_true',
-                        help='Use combined EASE (base + time weighted)')
+                        help='Use session-based weighted EASE')
     
-    # Combined EASE parameters
+    # Session/Page-based Weighted EASE parameters
+    parser.add_argument('--session_threshold', type=float, default=1800.0,
+                        help='Session split threshold in seconds (default: 1800 = 30 min)')
+    parser.add_argument('--page_threshold', type=float, default=30.0,
+                        help='Page split threshold in seconds (default: 30)')
+    parser.add_argument('--within_page_weight', type=float, default=1.0,
+                        help='Weight for item pairs within same page (default: 1.0)')
+    parser.add_argument('--cross_page_tau', type=float, default=60.0,
+                        help='Time decay parameter for cross-page pairs in seconds (default: 60)')
     parser.add_argument('--alpha', type=float, default=0.3,
-                        help='Weight for time-based matrix in combined mode (0=base only)')
-    parser.add_argument('--scale', type=float, default=None,
-                        help='Scale factor for time matrix (None=auto, uses mean of base matrix)')
-    
-    # Time-weighted parameters (for both weighted and combined)
-    parser.add_argument('--max_window_size', type=int, default=50,
-                        help='Maximum window size by count (default: 50)')
-    parser.add_argument('--max_time_diff', type=float, default=60.0,
-                        help='Maximum time difference in seconds (default: 60)')
-    parser.add_argument('--weight_mode', type=str, default='exponential',
-                        choices=['exponential', 'binary'],
-                        help='Weight mode: exponential or binary')
-    parser.add_argument('--tau', type=float, default=10.0,
-                        help='Time decay parameter for exponential mode (seconds)')
-    parser.add_argument('--time_threshold', type=float, default=5.0,
-                        help='Threshold for binary mode (seconds)')
-    parser.add_argument('--session_threshold', type=float, default=None,
-                        help='Session separation threshold (seconds), None to disable')
-    parser.add_argument('--stride', type=int, default=1,
-                        help='Window sliding step (default: 1)')
+                        help='Weight for session-based matrix (0 = base EASE only)')
     
     # Validation parameters
     parser.add_argument('--valid_random_items', type=int, default=9,
@@ -117,80 +107,14 @@ def train_basic_ease(args, data_loader, train_matrix, valid_matrix, valid_gt, lo
 
 
 def train_weighted_ease(args, data_loader, train_matrix, valid_matrix, valid_gt, logger):
-    """Train weighted EASE model with hybrid window co-occurrence."""
+    """Train session-based weighted EASE model."""
     logger.log(f"\n{'='*50}")
-    logger.log(f"Training Weighted EASE (λ={args.reg_weight})")
-    logger.log(f"  Max window size: {args.max_window_size}")
-    logger.log(f"  Max time diff: {args.max_time_diff}s")
-    logger.log(f"  Weight mode: {args.weight_mode}")
-    if args.weight_mode == 'exponential':
-        logger.log(f"  Tau: {args.tau}s")
-    elif args.weight_mode == 'binary':
-        logger.log(f"  Time threshold: {args.time_threshold}s")
-    if args.session_threshold:
-        logger.log(f"  Session threshold: {args.session_threshold}s")
-    logger.log(f"  Stride: {args.stride}")
-    logger.log(f"{'='*50}")
-    
-    # Build hybrid co-occurrence matrix
-    builder = WeightedMatrixBuilder(data_loader)
-    C = builder.build_hybrid_cooccurrence_matrix(
-        max_window_size=args.max_window_size,
-        max_time_diff=args.max_time_diff,
-        weight_mode=args.weight_mode,
-        tau=args.tau,
-        time_threshold=args.time_threshold,
-        session_threshold=args.session_threshold,
-        stride=args.stride,
-        train_matrix=train_matrix,
-        verbose=True
-    )
-    
-    logger.log(f"Co-occurrence matrix: shape={C.shape}, nnz={C.nnz}")
-    
-    # Fit model
-    model = WeightedEASE(reg_weight=args.reg_weight)
-    model.fit_with_cooccurrence(train_matrix, C, verbose=True)
-    
-    # Get recommendations
-    logger.log("\nGenerating recommendations...")
-    predictions, scores = model.recommend(
-        train_matrix,
-        top_k=10,
-        filter_already_liked=True
-    )
-    
-    # Evaluate
-    metrics = evaluate_all(predictions, valid_gt, k_values=[5, 10])
-    print_metrics(metrics, "Validation Results")
-    
-    logger.log_metrics(metrics, {
-        'model': 'HybridEASE',
-        'reg_weight': args.reg_weight,
-        'max_window_size': args.max_window_size,
-        'max_time_diff': args.max_time_diff,
-        'weight_mode': args.weight_mode,
-        'tau': args.tau if args.weight_mode == 'exponential' else None,
-        'time_threshold': args.time_threshold if args.weight_mode == 'binary' else None,
-        'session_threshold': args.session_threshold,
-        'stride': args.stride
-    })
-    
-    return model, metrics
-
-
-def train_combined_ease(args, data_loader, train_matrix, valid_matrix, valid_gt, logger):
-    """Train combined EASE model (base + time-weighted, Additive approach)."""
-    logger.log(f"\n{'='*50}")
-    logger.log(f"Training Combined EASE (λ={args.reg_weight})")
-    logger.log(f"  Alpha (time weight): {args.alpha}")
-    logger.log(f"  Scale: {args.scale if args.scale else 'auto'}")
-    logger.log(f"  Weight mode: {args.weight_mode}")
-    if args.weight_mode == 'exponential':
-        logger.log(f"  Tau: {args.tau}s")
-    elif args.weight_mode == 'binary':
-        logger.log(f"  Time threshold: {args.time_threshold}s")
-    logger.log(f"  Max time diff: {args.max_time_diff}s")
+    logger.log(f"Training Session-based Weighted EASE (λ={args.reg_weight})")
+    logger.log(f"  Session threshold: {args.session_threshold}s ({args.session_threshold/60:.1f} min)")
+    logger.log(f"  Page threshold: {args.page_threshold}s")
+    logger.log(f"  Within-page weight: {args.within_page_weight}")
+    logger.log(f"  Cross-page tau: {args.cross_page_tau}s")
+    logger.log(f"  Alpha: {args.alpha}")
     logger.log(f"{'='*50}")
     
     # Build combined co-occurrence matrix
@@ -198,16 +122,14 @@ def train_combined_ease(args, data_loader, train_matrix, valid_matrix, valid_gt,
     C_combined = builder.build_combined_cooccurrence_matrix(
         train_matrix=train_matrix,
         alpha=args.alpha,
-        scale=args.scale,
-        max_time_diff=args.max_time_diff,
-        weight_mode=args.weight_mode,
-        tau=args.tau,
-        time_threshold=args.time_threshold,
-        max_window_size=args.max_window_size,
+        session_threshold=args.session_threshold,
+        page_threshold=args.page_threshold,
+        within_page_weight=args.within_page_weight,
+        cross_page_tau=args.cross_page_tau,
         verbose=True
     )
     
-    logger.log(f"Combined matrix: shape={C_combined.shape}")
+    logger.log(f"\nCombined matrix: shape={C_combined.shape}")
     
     # Fit model
     model = WeightedEASE(reg_weight=args.reg_weight)
@@ -226,178 +148,134 @@ def train_combined_ease(args, data_loader, train_matrix, valid_matrix, valid_gt,
     print_metrics(metrics, "Validation Results")
     
     logger.log_metrics(metrics, {
-        'model': 'CombinedEASE',
+        'model': 'SessionWeightedEASE',
         'reg_weight': args.reg_weight,
-        'alpha': args.alpha,
-        'scale': args.scale,
-        'weight_mode': args.weight_mode,
-        'tau': args.tau if args.weight_mode == 'exponential' else None,
-        'time_threshold': args.time_threshold if args.weight_mode == 'binary' else None,
-        'max_time_diff': args.max_time_diff
+        'session_threshold': args.session_threshold,
+        'page_threshold': args.page_threshold,
+        'within_page_weight': args.within_page_weight,
+        'cross_page_tau': args.cross_page_tau,
+        'alpha': args.alpha
     })
     
     return model, metrics
 
 
 def run_grid_search(args, data_loader, train_matrix, valid_matrix, valid_gt, logger):
-    """Run grid search over hyperparameters."""
+    """Run grid search over hyperparameters with flexible fixed/search parameter switching."""
     logger.log("\n" + "="*50)
     logger.log("Starting Grid Search")
     logger.log("="*50)
     
-    # Hyperparameter grid
-    reg_weights = [250, 500, 1000, 1500]
+    search_space = {
+        'reg_weight': [4800.0],
+        'session_threshold': [1500.0, 1800.0, 2100.0],
+        'page_threshold': [4],
+        'alpha': [49, 50, 51],
+        'cross_page_tau': [550.0, 560.0, 570.0, 580.0],
+        'within_page_weight': [0.2, 0.25, 0.3],
+    }
+    
+    # 파라미터 그룹 정의: 어떤 파라미터가 바뀌면 어떤 계산을 다시 해야 하는지
+    MATRIX_BUILD_PARAMS = {'session_threshold', 'page_threshold', 'cross_page_tau', 'within_page_weight'}
+    
+    # =================================================================
+    # 캐싱을 위한 헬퍼 함수들
+    # =================================================================
+    builder = WeightedMatrixBuilder(data_loader)
+    
+    # C_base는 train_matrix에만 의존하므로 한 번만 계산
+    C_base = (train_matrix.T @ train_matrix).toarray().astype(np.float32)
+    base_mean = C_base[C_base > 0].mean()
+    
+    # Session matrix 캐시 (dictionary 기반, lru_cache는 unhashable 인자 문제)
+    session_matrix_cache: Dict[Tuple, np.ndarray] = {}
+    
+    def get_session_matrix(session_threshold: float, page_threshold: int, 
+                           cross_page_tau: float, within_page_weight: float) -> np.ndarray:
+        """캐싱된 session cooccurrence matrix 반환."""
+        cache_key = (session_threshold, page_threshold, cross_page_tau, within_page_weight)
+        
+        if cache_key not in session_matrix_cache:
+            logger.log(f"\n[Building matrix] session_th={session_threshold}s, page_th={page_threshold}s, "
+                      f"tau={cross_page_tau}s, within_weight={within_page_weight}")
+            
+            C_session = builder.build_session_cooccurrence_matrix(
+                session_threshold=session_threshold,
+                page_threshold=page_threshold,
+                within_page_weight=within_page_weight,
+                cross_page_tau=cross_page_tau,
+                train_matrix=train_matrix,
+                verbose=True
+            ).toarray().astype(np.float32)
+            
+            # Normalize
+            session_max = C_session.max()
+            if session_max > 0:
+                C_session = C_session / session_max
+            
+            session_matrix_cache[cache_key] = C_session
+        
+        return session_matrix_cache[cache_key]
+    
+    # =================================================================
+    # Grid Search 실행
+    # =================================================================
+    param_names = list(search_space.keys())
+    param_values = list(search_space.values())
+    all_combinations = list(itertools.product(*param_values))
+    total_combinations = len(all_combinations)
+    
+    # 로깅: 고정 vs 탐색 파라미터 구분
+    fixed_params = {k: v[0] for k, v in search_space.items() if len(v) == 1}
+    search_params = {k: v for k, v in search_space.items() if len(v) > 1}
+    
+    logger.log(f"\nFixed parameters: {fixed_params}")
+    logger.log(f"Search parameters: {list(search_params.keys())}")
+    logger.log(f"Grid sizes: {' × '.join(f'{len(v)}' for v in search_params.values())}")
+    logger.log(f"Total combinations: {total_combinations}")
     
     best_recall = 0
     best_params = {}
     best_model = None
     
-    # Basic EASE grid search
-    logger.log("\n--- Basic EASE ---")
-    for reg_weight in reg_weights:
-        logger.log(f"\nTrying λ={reg_weight}...")
+    for idx, param_tuple in enumerate(all_combinations, 1):
+        config = dict(zip(param_names, param_tuple))
         
-        model = EASE(reg_weight=reg_weight)
-        model.fit(train_matrix, verbose=False)
+        C_session_norm = get_session_matrix(
+            session_threshold=config['session_threshold'],
+            page_threshold=config['page_threshold'],
+            cross_page_tau=config['cross_page_tau'],
+            within_page_weight=config['within_page_weight']
+        )
+        
+        C_combined = C_base + config['alpha'] * base_mean * C_session_norm
+        
+        model = WeightedEASE(reg_weight=config['reg_weight'])
+        model.fit_with_cooccurrence(train_matrix, C_combined, verbose=False)
         
         predictions, _ = model.recommend(train_matrix, top_k=10, filter_already_liked=True)
         metrics = evaluate_all(predictions, valid_gt, k_values=[10])
         
         recall_10 = metrics['Recall@10']
-        logger.log(f"  Recall@10: {recall_10:.4f}")
         
-        logger.log_metrics(metrics, {'model': 'EASE', 'reg_weight': reg_weight})
+        log_params = {'model': 'SessionWeightedEASE', **config}
+        logger.log_metrics(metrics, log_params)
         
-        if recall_10 > best_recall:
+        is_best = recall_10 > best_recall
+        if is_best:
             best_recall = recall_10
-            best_params = {'model': 'EASE', 'reg_weight': reg_weight}
+            best_params = log_params.copy()
             best_model = model
-    
-    # Hybrid EASE grid search
-    logger.log("\n--- Hybrid EASE ---")
-    
-    # Grid parameters
-    max_time_diffs = [30, 60, 120, 300]
-    weight_modes = ['exponential', 'binary']
-    taus = [10, 30, 60]  # for exponential
-    time_thresholds = [5, 10, 30]  # for binary
-    
-    builder = WeightedMatrixBuilder(data_loader)
-    
-    for max_time_diff in max_time_diffs:
-        for weight_mode in weight_modes:
-            if weight_mode == 'exponential':
-                weight_params = taus
-                param_name = 'tau'
-            else:  # binary
-                weight_params = time_thresholds
-                param_name = 'time_threshold'
-            
-            for weight_param in weight_params:
-                logger.log(f"\nBuilding co-occurrence matrix (max_time_diff={max_time_diff}, mode={weight_mode}, {param_name}={weight_param})...")
-                
-                C = builder.build_hybrid_cooccurrence_matrix(
-                    max_window_size=50,  # Large enough to be time-dominant
-                    max_time_diff=max_time_diff,
-                    weight_mode=weight_mode,
-                    tau=weight_param if weight_mode == 'exponential' else 30.0,
-                    time_threshold=weight_param if weight_mode == 'binary' else 10.0,
-                    session_threshold=None,
-                    stride=1,
-                    train_matrix=train_matrix,
-                    verbose=False
-                )
-                
-                for reg_weight in reg_weights:
-                    logger.log(f"  Trying λ={reg_weight}...")
-                    
-                    model = WeightedEASE(reg_weight=reg_weight)
-                    model.fit_with_cooccurrence(train_matrix, C, verbose=False)
-                    
-                    predictions, _ = model.recommend(train_matrix, top_k=10, filter_already_liked=True)
-                    metrics = evaluate_all(predictions, valid_gt, k_values=[10])
-                    
-                    recall_10 = metrics['Recall@10']
-                    logger.log(f"    Recall@10: {recall_10:.4f}")
-                    
-                    log_params = {
-                        'model': 'HybridEASE',
-                        'reg_weight': reg_weight,
-                        'max_time_diff': max_time_diff,
-                        'weight_mode': weight_mode,
-                    }
-                    if weight_mode == 'exponential':
-                        log_params['tau'] = weight_param
-                    else:
-                        log_params['time_threshold'] = weight_param
-                    
-                    logger.log_metrics(metrics, log_params)
-                    
-                    if recall_10 > best_recall:
-                        best_recall = recall_10
-                        best_params = log_params.copy()
-                        best_model = model
-    
-    # Combined EASE grid search (Additive approach)
-    logger.log("\n--- Combined EASE (Additive) ---")
-    
-    alphas = [0.1, 0.3, 0.5, 1.0, 2.0]
-    # Use best time params from previous experiments
-    time_configs = [
-        {'weight_mode': 'exponential', 'tau': 10.0, 'time_threshold': 5.0},
-        {'weight_mode': 'binary', 'tau': 10.0, 'time_threshold': 5.0},
-    ]
-    
-    for time_config in time_configs:
-        for alpha in alphas:
-            logger.log(f"\nBuilding combined matrix (alpha={alpha}, mode={time_config['weight_mode']})...")
-            
-            C_combined = builder.build_combined_cooccurrence_matrix(
-                train_matrix=train_matrix,
-                alpha=alpha,
-                scale=None,  # Auto-scale
-                max_time_diff=60.0,
-                weight_mode=time_config['weight_mode'],
-                tau=time_config['tau'],
-                time_threshold=time_config['time_threshold'],
-                max_window_size=50,
-                verbose=False
-            )
-            
-            for reg_weight in reg_weights:
-                logger.log(f"  Trying λ={reg_weight}...")
-                
-                model = WeightedEASE(reg_weight=reg_weight)
-                model.fit_with_cooccurrence(train_matrix, C_combined, verbose=False)
-                
-                predictions, _ = model.recommend(train_matrix, top_k=10, filter_already_liked=True)
-                metrics = evaluate_all(predictions, valid_gt, k_values=[10])
-                
-                recall_10 = metrics['Recall@10']
-                logger.log(f"    Recall@10: {recall_10:.4f}")
-                
-                log_params = {
-                    'model': 'CombinedEASE',
-                    'reg_weight': reg_weight,
-                    'alpha': alpha,
-                    'weight_mode': time_config['weight_mode'],
-                }
-                if time_config['weight_mode'] == 'exponential':
-                    log_params['tau'] = time_config['tau']
-                else:
-                    log_params['time_threshold'] = time_config['time_threshold']
-                
-                logger.log_metrics(metrics, log_params)
-                
-                if recall_10 > best_recall:
-                    best_recall = recall_10
-                    best_params = log_params.copy()
-                    best_model = model
+        
+        search_vals = ' | '.join(f"{k}={config[k]}" for k in search_params.keys())
+        status = "★ BEST" if is_best else ""
+        logger.log(f"  [{idx}/{total_combinations}] {search_vals} → Recall@10={recall_10:.4f} {status}")
     
     logger.log("\n" + "="*50)
     logger.log("Grid Search Complete!")
     logger.log(f"Best Recall@10: {best_recall:.4f}")
     logger.log(f"Best Parameters: {best_params}")
+    logger.log(f"Session matrix cache hits: {len(session_matrix_cache)} unique matrices built")
     logger.log("="*50)
     
     return best_model, best_params
@@ -413,10 +291,8 @@ def main():
     # Initialize logger
     if args.grid_search:
         experiment_name = "grid_search"
-    elif args.combined:
-        experiment_name = "combined_ease"
     elif args.weighted:
-        experiment_name = "weighted_ease"
+        experiment_name = "session_weighted_ease"
     else:
         experiment_name = "ease"
     logger = ExperimentLogger(args.output_dir, experiment_name)
@@ -444,10 +320,6 @@ def main():
     # Train model
     if args.grid_search:
         model, best_params = run_grid_search(
-            args, data_loader, train_matrix, valid_matrix, valid_gt, logger
-        )
-    elif args.combined:
-        model, metrics = train_combined_ease(
             args, data_loader, train_matrix, valid_matrix, valid_gt, logger
         )
     elif args.weighted:

@@ -37,19 +37,22 @@ python run_train.py
 
 # 정규화 파라미터 변경
 python run_train.py --reg_weight 1000
-
-# 시간 분포 분석 포함
-python run_train.py --analyze_time
 ```
 
-### 2. Weighted EASE (시간 가중치 적용)
+### 2. Session-based Weighted EASE
 
 ```bash
-# 시간 가중치 EASE
-python run_train.py --weighted --tau 30 --reg_weight 500
+# 기본 세션/페이지 기반 가중치 EASE
+python run_train.py --weighted
 
-# Hard threshold 추가
-python run_train.py --weighted --tau 30 --delta_t_threshold 60
+# 파라미터 조정
+python run_train.py --weighted \
+    --session_threshold 1800 \
+    --page_threshold 30 \
+    --within_page_weight 1.0 \
+    --cross_page_tau 60 \
+    --alpha 0.3 \
+    --reg_weight 500
 ```
 
 ### 3. 하이퍼파라미터 그리드 서치
@@ -64,8 +67,11 @@ python run_train.py --grid_search
 # 기본 EASE로 제출 파일 생성
 python run_inference.py --reg_weight 500
 
-# Weighted EASE로 제출 파일 생성
-python run_inference.py --weighted --tau 30 --reg_weight 500
+# Session-based Weighted EASE로 제출 파일 생성
+python run_inference.py --weighted \
+    --session_threshold 1800 \
+    --page_threshold 30 \
+    --alpha 0.3
 
 # 저장된 모델 로드해서 제출
 python run_inference.py --model_path ./output/ease_model.npy
@@ -76,9 +82,12 @@ python run_inference.py --model_path ./output/ease_model.npy
 | 파라미터 | 설명 | 기본값 |
 |---------|------|--------|
 | `--reg_weight` | EASE 정규화 파라미터 (λ) | 500.0 |
-| `--weighted` | 시간 가중치 EASE 사용 | False |
-| `--tau` | 시간 감쇠 파라미터 (초) | 30.0 |
-| `--delta_t_threshold` | 시간 차이 hard cutoff (초) | None |
+| `--weighted` | Session-based Weighted EASE 사용 | False |
+| `--session_threshold` | 세션 분리 기준 (초) | 1800.0 (30분) |
+| `--page_threshold` | 페이지 분리 기준 (초) | 30.0 |
+| `--within_page_weight` | 같은 페이지 내 아이템 쌍 가중치 | 1.0 |
+| `--cross_page_tau` | 다른 페이지 간 시간 감쇠 파라미터 (초) | 60.0 |
+| `--alpha` | 세션 기반 행렬 결합 가중치 | 0.3 |
 | `--valid_random_items` | 검증용 랜덤 홀드아웃 아이템 수 | 9 |
 | `--valid_seq_items` | 검증용 순차 홀드아웃 아이템 수 | 1 |
 
@@ -89,11 +98,27 @@ python run_inference.py --model_path ./output/ease_model.npy
 - 대각 요소 제로 제약으로 자기 자신 추천 방지
 - Closed-form solution으로 빠른 학습
 
-### Weighted EASE
-- 시간 근접성 기반 co-occurrence 가중치 적용
-- 가중치 함수: `w(Δt) = exp(-Δt / τ)`
-- 짧은 시간 간격의 아이템 쌍에 높은 가중치
-- 같은 노출 묶음 복원에 효과적
+### Session-based Weighted EASE
+
+유저 행동 패턴을 세션/페이지 계층 구조로 모델링:
+
+```
+유저 시퀀스
+└── 세션 (30분 gap 기준)
+    └── 페이지 (30초 gap 기준)
+        └── 아이템들
+```
+
+**가중치 규칙:**
+- **같은 페이지**: `within_page_weight` (기본 1.0) - 확실히 같은 노출 묶음
+- **같은 세션, 다른 페이지**: `exp(-Δt / cross_page_tau)` - 같은 탐색 흐름, 다른 맥락
+- **다른 세션**: 0 - 완전히 다른 시점
+
+**결합 방식:**
+```
+C_final = X^T X + α × scale × normalize(C_session)
+```
+- 기본 EASE의 co-occurrence 행렬에 세션 기반 정보를 추가
 
 ## 검증 전략
 

@@ -1,5 +1,15 @@
 """
 EASE Model Package for Movie Recommendation.
+
+Session/Page-based Weighted EASE implementation.
+
+Hierarchy:
+    User Sequence → Session (30min gap) → Page (30sec gap) → Items
+
+Weight rules:
+    - Same page: within_page_weight (default 1.0)
+    - Same session, different page: exp(-Δt / cross_page_tau)
+    - Different session: 0 (not computed)
 """
 
 from .data_loader import DataLoader, WeightedMatrixBuilder

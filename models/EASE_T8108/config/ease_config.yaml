@@ -10,14 +10,21 @@ data:
 model:
   # EASE regularization parameter (lambda)
   reg_weight: 500.0
-  
-# Weighted EASE parameters (for future use)
+
+# Session/Page-based Weighted EASE parameters
 weighted:
   enabled: false
-  # Time decay parameter (tau) in seconds
-  tau: 30.0
-  # Hard threshold for co-occurrence (seconds), null for soft decay only
-  delta_t_threshold: null
+  
+  # Session parameters
+  session_threshold: 1800.0   # 30 minutes - session split threshold (seconds)
+  page_threshold: 30.0        # 30 seconds - page split threshold (seconds)
+  
+  # Weight parameters
+  within_page_weight: 1.0     # Weight for item pairs within same page
+  cross_page_tau: 60.0        # Time decay parameter for cross-page pairs (seconds)
+  
+  # Combination parameter
+  alpha: 0.3                  # Weight for session-based matrix (0 = base EASE only)
 
 # Evaluation
 eval:

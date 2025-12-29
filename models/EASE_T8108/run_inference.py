@@ -7,8 +7,8 @@ Usage:
     # Basic EASE
     python run_inference.py --reg_weight 500
     
-    # Weighted EASE
-    python run_inference.py --weighted --tau 30 --reg_weight 500
+    # Session-based Weighted EASE
+    python run_inference.py --weighted --session_threshold 1800 --page_threshold 30 --alpha 0.3
     
     # Load pre-trained model
     python run_inference.py --model_path ./output/ease_model.npy
@@ -41,13 +41,21 @@ def parse_args():
     parser.add_argument('--reg_weight', type=float, default=500.0,
                         help='EASE regularization weight (lambda)')
     
-    # Weighted EASE parameters  
+    # Model type selection
     parser.add_argument('--weighted', action='store_true',
-                        help='Use time-weighted EASE')
-    parser.add_argument('--tau', type=float, default=30.0,
-                        help='Time decay parameter (seconds)')
-    parser.add_argument('--delta_t_threshold', type=float, default=None,
-                        help='Hard threshold for time difference')
+                        help='Use session-based weighted EASE')
+    
+    # Session/Page-based Weighted EASE parameters
+    parser.add_argument('--session_threshold', type=float, default=1800.0,
+                        help='Session split threshold in seconds (default: 1800 = 30 min)')
+    parser.add_argument('--page_threshold', type=float, default=30.0,
+                        help='Page split threshold in seconds (default: 30)')
+    parser.add_argument('--within_page_weight', type=float, default=1.0,
+                        help='Weight for item pairs within same page (default: 1.0)')
+    parser.add_argument('--cross_page_tau', type=float, default=60.0,
+                        help='Time decay parameter for cross-page pairs in seconds (default: 60)')
+    parser.add_argument('--alpha', type=float, default=0.3,
+                        help='Weight for session-based matrix (0 = base EASE only)')
     
     # Pre-trained model
     parser.add_argument('--model_path', type=str, default=None,
@@ -100,15 +108,25 @@ def main():
         print(f"\nTraining model from scratch...")
         
         if args.weighted:
+            print(f"  Session threshold: {args.session_threshold}s ({args.session_threshold/60:.1f} min)")
+            print(f"  Page threshold: {args.page_threshold}s")
+            print(f"  Within-page weight: {args.within_page_weight}")
+            print(f"  Cross-page tau: {args.cross_page_tau}s")
+            print(f"  Alpha: {args.alpha}")
+            
             builder = WeightedMatrixBuilder(data_loader)
-            C = builder.build_item_cooccurrence_matrix(
-                tau=args.tau,
-                delta_t_threshold=args.delta_t_threshold,
-                train_matrix=None  # Use all data
+            C_combined = builder.build_combined_cooccurrence_matrix(
+                train_matrix=full_matrix,
+                alpha=args.alpha,
+                session_threshold=args.session_threshold,
+                page_threshold=args.page_threshold,
+                within_page_weight=args.within_page_weight,
+                cross_page_tau=args.cross_page_tau,
+                verbose=True
             )
             
             model = WeightedEASE(reg_weight=args.reg_weight)
-            model.fit_with_cooccurrence(full_matrix, C, verbose=True)
+            model.fit_with_cooccurrence(full_matrix, C_combined, verbose=True)
         else:
             model = EASE(reg_weight=args.reg_weight)
             model.fit(full_matrix, verbose=True)
