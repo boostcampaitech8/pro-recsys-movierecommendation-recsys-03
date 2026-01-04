@@ -2,53 +2,87 @@ import torch
 import numpy as np
 from tqdm import tqdm
 
+from create_sideinfo import build_side_info
+import torch
+import numpy as np
+
 def recall_at_k(
-    model, train_sequences, val_items,
-    item2idx, idx2item,
-    k=10, device="cuda"
+    model,
+    train_sequences,
+    val_items,
+    item2idx,
+    idx2item,
+    item2genres,
+    item2year_bucket,
+    k=10,
+    device="cuda"
 ):
     model.eval()
+
     recall_sum = 0.0
     ndcg_sum = 0.0
-    n_eval = 0
+    n_eval_users = 0
 
     with torch.no_grad():
         for u in range(len(val_items)):
-            # --- 1. train sequence 준비 ---
-            seq = train_sequences[u]
-            if len(seq) == 0 or len(val_items[u]) == 0:
+            if len(train_sequences[u]) == 0 or len(val_items[u]) == 0:
                 continue
 
-            x = torch.LongTensor(seq).unsqueeze(1).to(device)
+            # 마지막 아이템만 사용 (GRU4Rec 논문 방식)
+            last_item = train_sequences[u][-1]
+            if last_item not in item2idx:
+                continue
 
-            h0 = torch.zeros(1, 1, model.gru.hidden_size, device=device)
+            x = torch.LongTensor([item2idx[last_item]]).to(device)
 
-            emb = model.embedding(x)          
-            out, h = model.gru(emb, h0)
+            genre_idx, year_idx = build_side_info(
+                x,
+                item2genres,
+                item2year_bucket,
+                device
+            )
 
-            logits = model.fc(out[-1])        
-            scores = logits.squeeze(0).cpu().numpy()
+            h0 = torch.zeros(
+                1, 1, model.gru.hidden_size, device=device
+            )
 
-            for s in seq:
-                scores[s] = -np.inf
+            logits, _ = model(x, genre_idx, year_idx, h0)
+            scores = logits[0].clone()
 
-            top_k_idx = np.argpartition(scores, -k)[-k:]
-            top_k_idx = top_k_idx[np.argsort(scores[top_k_idx])[::-1]]
+            # 이미 본 아이템 제거
+            for it in train_sequences[u]:
+                if it in item2idx:
+                    scores[item2idx[it]] = -1e9
 
-            top_k_items = [
-                idx2item[i] for i in top_k_idx if i in idx2item
-            ]
+            topk_idx = torch.topk(scores, k).indices.cpu().numpy()
+            topk_items = [idx2item[i] for i in topk_idx]
 
-            gt_items = [idx2item[i] for i in val_items[u]]
+            gt_items = set(val_items[u])
 
-            hits = len(set(top_k_items) & set(gt_items))
+            # recall@k
+            hits = len(set(topk_items) & gt_items)
             recall_sum += hits / min(k, len(gt_items))
 
-            ndcg = ndcg_at_k(top_k_items, gt_items, k)
-            ndcg_sum += ndcg
-            n_eval += 1
+            # ndcg@k
+            dcg = 0.0
+            for rank, item in enumerate(topk_items):
+                if item in gt_items:
+                    dcg += 1.0 / np.log2(rank + 2)
 
-    return recall_sum / n_eval, ndcg_sum / n_eval
+            idcg = sum(
+                1.0 / np.log2(i + 2)
+                for i in range(min(len(gt_items), k))
+            )
+
+            ndcg_sum += dcg / idcg if idcg > 0 else 0.0
+
+            n_eval_users += 1
+
+    return (
+        recall_sum / n_eval_users,
+        ndcg_sum / n_eval_users
+    )
+
 
 def ndcg_at_k(top_k_items, gt_items, k):
     dcg = 0.0

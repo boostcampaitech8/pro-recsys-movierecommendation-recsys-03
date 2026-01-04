@@ -8,6 +8,7 @@ import torch.nn as nn
 import pandas as pd
 from tqdm import tqdm
 from utils import recall_at_k, sample_negatives, top1_loss, bpr_loss, ndcg_at_k, save_logits
+from create_sideinfo import build_side_info, build_item2year_bucket, build_item2genres
 import numpy as np
 import wandb
 
@@ -33,6 +34,9 @@ def train_model(model, sequences, val_items, num_items, item2idx, idx2item, user
  
     loader = SessionParallelLoader(sequences, batch_size)
 
+    item2year_bucket = build_item2year_bucket(item2idx, num_items, device)
+    item2genres, genre2idx, idx2genre = build_item2genres(item2idx)
+
     for epoch in range(n_epochs):
         model.train()
         h = None
@@ -48,6 +52,17 @@ def train_model(model, sequences, val_items, num_items, item2idx, idx2item, user
             if y.numel() == 0:
                 print("Empty target batch, skipping step")
                 continue
+            
+            # side info
+            genre_idx, year_idx = build_side_info(
+                batch_items=x,
+                item2genres=item2genres,
+                item2year_bucket=item2year_bucket,
+                device=device
+            )
+
+            assert genre_idx.min() >= 0
+            assert genre_idx.max() < 18
 
             if h is None:
                 h = torch.zeros(1, x.size(0), model.gru.hidden_size).to(device)
@@ -65,18 +80,13 @@ def train_model(model, sequences, val_items, num_items, item2idx, idx2item, user
                 if reset.any():
                     batch_idx = torch.nonzero(torch.tensor(reset, dtype=torch.bool, device=device), as_tuple=True)[0]
                     h[:, batch_idx, :] = 0
-            logits, h = model(x, h.detach())
+
+            logits, h = model(x, genre_idx, year_idx, h.detach())
             optimizer.zero_grad()
             
             pos_scores = logits[torch.arange(y.size(0)), y]
 
-            neg_items = sample_negatives(
-                # batch_size=y.size(0),
-                # num_items=num_items,
-                # positives=y,
-                # device=device
-                y
-            )
+            neg_items = sample_negatives(y)
 
             neg_scores = logits[torch.arange(y.size(0)), neg_items]
             #print(pos_scores, neg_scores)
@@ -89,7 +99,7 @@ def train_model(model, sequences, val_items, num_items, item2idx, idx2item, user
             total_loss += loss.item()
             steps += 1
         model.eval()
-        recall,ndcg = recall_at_k(model, sequences, val_items, item2idx, idx2item, k=10, device=device)
+        recall,ndcg = recall_at_k(model, sequences, val_items, item2idx, idx2item,item2genres, item2year_bucket, k=10, device=device)
         
         print(f"Epoch {epoch+1}, Loss: {total_loss/steps:.4f}")
         print()
@@ -174,3 +184,71 @@ def create_submission(
         save_path="submission\\submission_logits.npy"
     )
     pd.DataFrame(submission).to_csv("submission\\submission.csv", index=False)
+
+@torch.no_grad()
+def create_submission_sideinfo(
+    model,
+    user_sequences,
+    item2idx,
+    idx2item,
+    user2idx,
+    idx2user,
+    item2genres,
+    item2year_bucket,
+    top_k=10
+):
+    print("Creating submission...")
+    model.eval()
+    device = next(model.parameters()).device
+    submission = []
+
+    for user_idx, seq in enumerate(tqdm(user_sequences)):
+
+        if len(seq) == 0:
+            submission.append({
+                "user": idx2user[user_idx],
+                "item": ""
+            })
+            continue
+
+        # raw item → index
+        seq_idx = [item2idx[i] for i in seq if i in item2idx]
+        if len(seq_idx) == 0:
+            submission.append({
+                "user": idx2user[user_idx],
+                "item": ""
+            })
+            continue
+
+        h = torch.zeros(1, 1, model.gru.hidden_size, device=device)
+
+        for item_idx in seq_idx:
+            x = torch.LongTensor([item_idx]).to(device)
+
+            genre_idx, year_idx = build_side_info(
+                x,
+                item2genres,
+                item2year_bucket,
+                device
+            )
+
+            logits, h = model(x, genre_idx, year_idx, h)
+
+        scores = logits[0].clone()
+
+        # 이미 본 아이템 제거
+        scores[seq_idx] = -1e9
+
+        topk_idx = torch.topk(scores, top_k).indices.cpu().numpy()
+        rec_items = [idx2item[i] for i in topk_idx]
+
+        for it in rec_items:
+            submission.append({
+                "user": idx2user[user_idx],
+                "item": it
+            })
+
+    pd.DataFrame(submission).to_csv(
+        "submission/submission_sideinfo.csv",
+        index=False
+    )
