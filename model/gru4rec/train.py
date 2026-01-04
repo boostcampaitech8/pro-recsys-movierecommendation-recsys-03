@@ -7,11 +7,11 @@ import torch
 import torch.nn as nn
 import pandas as pd
 from tqdm import tqdm
-from utils import recall_at_k, sample_negatives, top1_loss, bpr_loss, ndcg_at_k
+from utils import recall_at_k, sample_negatives, top1_loss, bpr_loss, ndcg_at_k, save_logits
 import numpy as np
 import wandb
 
-def train_model(model, sequences, val_items, num_items, item2idx, idx2item, n_epochs=10, batch_size=64, learning_rate=0.001):
+def train_model(model, sequences, val_items, num_items, item2idx, idx2item, user2idx, idx2user,n_epochs=10, batch_size=64, learning_rate=0.001):
     wandb.init(
         project="gru4rec",
         name="gru4rec_top1_bs64",
@@ -27,6 +27,7 @@ def train_model(model, sequences, val_items, num_items, item2idx, idx2item, n_ep
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(device)
     model.to(device)
+    best_recall = -1
 
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
  
@@ -98,6 +99,16 @@ def train_model(model, sequences, val_items, num_items, item2idx, idx2item, n_ep
             "val/recall@10": recall,
             "val/ndcg@10": ndcg
         })
+        if recall > best_recall:
+            best_recall = recall
+            torch.save({
+                "model_state_dict": model.state_dict(),
+                "item2idx": item2idx,
+                "idx2item": idx2item,
+                "user2idx": user2idx,
+                "idx2user": idx2user,
+            }, f"gru4rec_best_{batch_size}.pt")
+
     wandb.finish()
 
 
@@ -111,11 +122,12 @@ def create_submission(
     idx2user,
     top_k=10
 ):
+    print("Creating submission...")
     model.eval()
     device = next(model.parameters()).device
     submission = []
 
-    for user_idx, seq in enumerate(user_sequences):
+    for user_idx, seq in enumerate(tqdm(user_sequences)):
 
         # 빈 시퀀스 skip
         if len(seq) == 0:
@@ -151,9 +163,14 @@ def create_submission(
 
         rec_items = [idx2item[i] for i in top_k_idx]
 
-        submission.append({
-            "user": idx2user[user_idx],
-            "item": " ".join(map(str, rec_items))
-        })
-
-    pd.DataFrame(submission).to_csv("submission.csv", index=False)
+        for i in rec_items:
+            submission.append({
+                "user": idx2user[user_idx],
+                "item": i
+            })
+    save_logits(
+        model,
+        user_sequences,
+        save_path="submission\\submission_logits.npy"
+    )
+    pd.DataFrame(submission).to_csv("submission\\submission.csv", index=False)

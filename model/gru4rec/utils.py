@@ -104,6 +104,7 @@ def save_logits(
     user_sequences,
     save_path="logits.npy"
 ):
+    print("Saving logits...")
     model.eval()
     device = next(model.parameters()).device
 
