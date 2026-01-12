@@ -1,0 +1,24 @@
+# Paths
+data:
+  base_url: '../../data/train/'
+  output_dir: './data/processed/'
+  submission_path: './submission.csv'
+
+# Model Hyperparameters
+model:
+  hidden_dim: 800
+  latent_dim: 200
+  dropout: 0.3
+
+# Training Settings
+train:
+  batch_size: 64
+  lr: 0.0002
+  epochs: 50
+  beta: 0.2  # KL loss weight
+  gamma: 0.01 # RecVAE specific weight
+  seed: 42
+  enc_epochs: 3
+  device: 'cuda'
+
+seed: 42

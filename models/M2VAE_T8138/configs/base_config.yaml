@@ -1,0 +1,17 @@
+# configs/base_config.yaml
+data:
+  base_url: "../../data/train/"
+  batch_size: 128
+
+model:
+  hidden_dim: 800
+  latent_dim: 256
+  dropout: 0.3
+  lr: 1e-3
+  epochs: 30
+
+train:
+  beta: 0.1
+  total_anneal_steps: 20000
+  device: "cuda"
+  seed: 42
